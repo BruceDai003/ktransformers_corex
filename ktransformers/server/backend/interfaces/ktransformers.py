@@ -85,6 +85,7 @@ class KTransformersInterface(TransformersInterface):
         torch_device = get_device("blk.0.self_attn", device_map)
         torch_device = "cuda:0" if torch_device == "cuda" else torch_device
         torch.cuda.set_device(torch_device)
+        self.args.use_cuda_graph = False
         if warm_uped and self.args.use_cuda_graph:
             if not hasattr(self, "cuda_graph_runner"):
                 self.cuda_graph_runner = CUDAGraphRunner()

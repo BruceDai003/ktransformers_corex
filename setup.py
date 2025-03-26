@@ -339,8 +339,8 @@ class CMakeBuild(BuildExtension):
             item for item in cpu_args.split(" ") if item
         ]
         # In this example, we pass in the version to C++. You might not need to.
-        cmake_args += [
-            f"-DEXAMPLE_VERSION_INFO={self.distribution.get_version()}"]
+        # cmake_args += [
+        #     f"-DEXAMPLE_VERSION_INFO={self.distribution.get_version()}"]
         if self.compiler.compiler_type != "msvc":
             if not cmake_generator or cmake_generator == "Ninja":
                 pass
@@ -410,12 +410,12 @@ if CUDA_HOME is not None or ROCM_HOME is not None:
     ],
     extra_compile_args={
             'cxx': ['-O3', '-DKTRANSFORMERS_USE_CUDA'],
-            'nvcc': [
-                '-O3',
-                # '--use_fast_math',
-                '-Xcompiler', '-fPIC',
-                '-DKTRANSFORMERS_USE_CUDA',
-            ]
+            # 'nvcc': [
+            #     '-O3',
+            #     '--use_fast_math',
+            #     '-Xcompiler', '-fPIC',
+            #     '-DKTRANSFORMERS_USE_CUDA',
+            # ]
         }
     )
 elif MUSA_HOME is not None:
@@ -446,18 +446,18 @@ else:
 
 ext_modules = [
     CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
-    ops_module,
-    CUDAExtension(
-        'vLLMMarlin', [
-            'csrc/custom_marlin/binding.cpp',
-            'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
-            'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
-        ],
-        extra_compile_args={
-            'cxx': ['-O3'],
-            'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
-        },
-    )
+    # ops_module,
+    # CUDAExtension(
+    #     'vLLMMarlin', [
+    #         'csrc/custom_marlin/binding.cpp',
+    #         'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
+    #         'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
+    #     ],
+    #     extra_compile_args={
+    #         'cxx': ['-O3'],
+    #         'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
+    #     },
+    # )
 ]
 if with_balance:
     print("using balance_serve")

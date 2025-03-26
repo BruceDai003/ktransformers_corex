@@ -67,7 +67,8 @@ def local_chat(
 ):
 
     torch.set_grad_enabled(False)
-
+    
+    use_cuda_graph = False
     Config().cpu_infer = cpu_infer
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)

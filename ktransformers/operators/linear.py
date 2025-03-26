@@ -14,8 +14,9 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 import ctypes
 import torch
 from torch import Tensor, nn
-import KTransformersOps 
-import vLLMMarlin
+# import KTransformersOps 
+# import vLLMMarlin
+
 from ktransformers.util.custom_gguf import GGUFLoader
 from ktransformers.util.utils import InferenceState
 from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marlin_utils import (
@@ -39,6 +40,7 @@ from ktransformers.operators.cpuinfer import CPUInfer
 from ktransformers.server.config.config import Config
 from typing import Dict, Tuple, Optional, Union
 import numpy as np
+import  ixformer.inference.functions as ops
 
 #class KLinearBase(BaseInjectedModule, ABC):
 class KLinearBase(ABC):
@@ -502,22 +504,22 @@ class VLinearMarlin(KLinearBase):
         marlin_s = self.marlin_s.to(x.dtype)
         sms = -1
 
-        x = vLLMMarlin.gptq_marlin_gemm(
-            x,
-            self.marlin_q_w,
-            marlin_s,
-            self.g_idx,
-            self.sort_indices,
-            self.workspace.scratch,
-            self.num_bits,
-            bsz_tensor,
-            # torch.tensor([x.shape[0]], dtype=torch.int32, device=self.device),
-            x.shape[0],
-            self.n,
-            x.shape[-1],
-            sms,
-            self.is_k_full,
-        )
+        # x = vLLMMarlin.gptq_marlin_gemm(
+        #     x,
+        #     self.marlin_q_w,
+        #     marlin_s,
+        #     self.g_idx,
+        #     self.sort_indices,
+        #     self.workspace.scratch,
+        #     self.num_bits,
+        #     bsz_tensor,
+        #     # torch.tensor([x.shape[0]], dtype=torch.int32, device=self.device),
+        #     x.shape[0],
+        #     self.n,
+        #     x.shape[-1],
+        #     sms,
+        #     self.is_k_full,
+        # )
         # x = KTransformersOps.gptq_marlin_gemm(
         #     x,
         #     self.marlin_q_w,
@@ -552,6 +554,9 @@ class KLinearMarlin(KLinearBase):
     g_idx: torch.Tensor
     sort_indices: torch.Tensor
     has_bias: bool
+    qweight: torch.Tensor
+    qzeros: torch.Tensor
+    scales: torch.Tensor
     def __init__(
         self,
         key: str,
@@ -595,11 +600,11 @@ class KLinearMarlin(KLinearBase):
 
         if isinstance(w, nn.Parameter):
             # pad weight
-            weight = w.view(self.orin_out_features, self.orin_in_features).T
+            weight = w.view(self.orin_out_features, self.orin_in_features)
             self.has_bias = False
         elif isinstance(w, tuple):
             w = list(w)
-            weight = w[0].view(self.orin_out_features, self.orin_in_features).T
+            weight = w[0].view(self.orin_out_features, self.orin_in_features)
             self.bias = w[1].view(self.orin_out_features)
             self.bias = w[1]
             self.has_bias = True
@@ -609,60 +614,153 @@ class KLinearMarlin(KLinearBase):
         if self.has_bias:
             self.bias = self.bias.to(device)
             
-        if self.padding:
-            padded_weight = torch.zeros(self.in_features, self.out_features, device=self.device)
-            padded_weight[:self.orin_in_features, :self.orin_out_features] = weight
-            weight = padded_weight
+        # if self.padding:
+        #     padded_weight = torch.zeros(self.in_features, self.out_features, device=self.device)
+        #     padded_weight[:self.orin_in_features, :self.orin_out_features] = weight
+        #     weight = padded_weight
 
-        # Pack Marlin linear
-        marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
-            weight, self.num_bits, self.group_size, self.act_order
-        )
-        self.workspace = MarlinWorkspace(
-            self.out_features, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL,self.device
-        )
-        self.weight = marlin_q_w # modeling_xxx.py may use linear.weight
-        self.marlin_q_w = marlin_q_w
-        self.marlin_s = marlin_s
-        self.g_idx = g_idx
-        self.sort_indices = sort_indices
-        self.k = weight.shape[0]
-        self.n = weight.shape[1]
-        self.loaded = True
+        # # Pack Marlin linear
+        # marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
+        #     weight, self.num_bits, self.group_size, self.act_order
+        # )
+        # self.workspace = MarlinWorkspace(
+        #     self.out_features, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL,self.device
+        # )
+        # self.weight = marlin_q_w # modeling_xxx.py may use linear.weight
+        # self.marlin_q_w = marlin_q_w
+        # self.marlin_s = marlin_s
+        # self.g_idx = g_idx
+        # self.sort_indices = sort_indices
+        # self.k = weight.shape[0]
+        # self.n = weight.shape[1]
+        # self.loaded = True
+        def awq_quantize(w):
+            org_w_shape = w.shape
+            ori_w_dtype = w.dtype
+            group_size = 128
+            w_bit = 4
+            in_features = org_w_shape[1]
+            assert w.shape[1] % group_size == 0
+            
+            w = w.reshape(-1, group_size)
+            assert torch.isnan(w).sum() == 0
+            max_val = w.amax(dim=1, keepdim=True)
+            min_val = w.amin(dim=1, keepdim=True)
+            max_int = 2**4 - 1 # 4 bit
+            min_int = 0
+            scales = (max_val - min_val).clamp(min=1e-5) / max_int
+            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+            w = (
+                torch.clamp(torch.round(w / scales) + zeros, min_int, max_int) - zeros
+            ) * scales
+            zeros = zeros.view(org_w_shape[0], -1)
+            scales = scales.view(org_w_shape[0], -1)
+            w = w.reshape(org_w_shape)
+            assert torch.isnan(scales).sum() == 0
+            assert torch.isnan(w).sum() == 0
+            
+            scales = scales.t().contiguous() # input // group, o
+            zeros = zeros.t().contiguous()   # input // group, o
+
+            # from auto awq
+            scale_zeros = zeros * scales
+            scales = scales.clone().to(ori_w_dtype)
+
+            pack_num = 32 // 4
+            intweight = []
+            for idx in range(in_features):
+                intweight.append(
+                    torch.round(
+                        (w[:, idx] + scale_zeros[idx // group_size])
+                        / scales[idx // group_size]
+                    ).to(torch.int)[:, None]
+                )
+            intweight = torch.cat(intweight, dim=1)
+            intweight = intweight.t().contiguous()
+            intweight = intweight.to(dtype=torch.int32)
+
+            qweight = torch.zeros(
+                (intweight.shape[0], intweight.shape[1] // 32 * 4),
+                dtype=torch.int32,
+                device=intweight.device,
+            )
+
+            for col in range(intweight.shape[1] // pack_num):
+                order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+                for i in range(pack_num):
+                    qweight_col = intweight[:, col * pack_num + order_map[i]]
+                    qweight[:, col] |= qweight_col << (i * w_bit)
+
+            zeros = zeros.to(dtype=torch.int32, device=qweight.device)
+
+            qzeros = torch.zeros(
+                (zeros.shape[0], zeros.shape[1] // 32 * w_bit),
+                dtype=torch.int32,
+                device=zeros.device,
+            )
+
+            for col in range(zeros.shape[1] // pack_num):
+                order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+                for i in range(pack_num):
+                    qzero_col = zeros[:, col * pack_num + order_map[i]]
+                    qzeros[:, col] |= qzero_col << (i * w_bit)
+            
+            return qweight, qzeros, scales
+            
+        # Get Awq linear
+        qweight, qzeros, scales = awq_quantize(weight)
+        self.qweight = qweight
+        self.qzeros = qzeros
+        self.scales = scales.bfloat16() # TODO(fix this)
+        # self.marlin_q_w = marlin_q_w
+        # self.marlin_s = marlin_s
+        # self.g_idx = g_idx
+        # self.sort_indices = sort_indices
+        # self.k = weight.shape[0]
+        # self.n = weight.shape[1]
 
     def forward(self, x: torch.Tensor, bsz_tensor: torch.Tensor=None, **kwargs) -> torch.Tensor:
         # Only support input x as BF16 and FP16
-        x = x.to(self.device)
-        orig_shape = list(x.shape)
-        orig_dtype = x.dtype
-        x = x.reshape(-1, orig_shape[-1])
-        x = x.reshape(-1, x.shape[-1])
-        if self.padding:
-            padding_input=torch.empty(x.shape[0], self.in_features, device=x.device, dtype=x.dtype)
-            padding_input[:,:self.orin_in_features] = x
-            x = padding_input
-        marlin_s = self.marlin_s.to(x.dtype)
-        x = KTransformersOps.gptq_marlin_gemm(
-            x,
-            self.marlin_q_w,
-            marlin_s,
-            self.g_idx,
-            self.sort_indices,
-            self.workspace.scratch,
-            self.num_bits,
-            x.shape[0],
-            self.n,
-            x.shape[-1],
-            self.is_k_full,
-        )
-        if self.padding:
-            x = x[:,:self.orin_out_features]
-            orig_shape[-1] = self.orin_out_features
-        else:
-            orig_shape[-1] = self.out_features
+        # x = x.to(self.device)
+        # orig_shape = list(x.shape)
+        # orig_dtype = x.dtype
+        # x = x.reshape(-1, orig_shape[-1])
+        # x = x.reshape(-1, x.shape[-1])
+        # if self.padding:
+        #     padding_input=torch.empty(x.shape[0], self.in_features, device=x.device, dtype=x.dtype)
+        #     padding_input[:,:self.orin_in_features] = x
+        #     x = padding_input
+        # marlin_s = self.marlin_s.to(x.dtype)
+        # x = KTransformersOps.gptq_marlin_gemm(
+        #     x,
+        #     self.marlin_q_w,
+        #     marlin_s,
+        #     self.g_idx,
+        #     self.sort_indices,
+        #     self.workspace.scratch,
+        #     self.num_bits,
+        #     x.shape[0],
+        #     self.n,
+        #     x.shape[-1],
+        #     self.is_k_full,
+        # )
+        # if self.padding:
+        #     x = x[:,:self.orin_out_features]
+        #     orig_shape[-1] = self.orin_out_features
+        # else:
+        #     orig_shape[-1] = self.out_features
+        pack_factor = 8
+        qweight = self.qweight
+        scales = self.scales
+        qzeros = self.qzeros
+        out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
+        reshaped_x = x.reshape(-1, x.shape[-1])
+        out = ops.wui4a16(reshaped_x, qweight, scales, qzeros, None, 128, "NN")
         if self.has_bias:
-            x = x + self.bias
-        return x.reshape(orig_shape).to(orig_dtype)
+            # x = x + self.bias
+            out.add_(self.bias)
+        return out.reshape(out_shape)
+        # return x.reshape(orig_shape).to(orig_dtype)
 
     def unload(self):
 
@@ -673,6 +771,9 @@ class KLinearMarlin(KLinearBase):
         self.g_idx = None
         self.sort_indices = None
         self.workspace = None
+        self.qweight = None
+        self.qzeros = None
+        self.scales = None
 
 class KLinearCPUInfer(KLinearBase):
     CPU_INFER = None
@@ -833,12 +934,12 @@ class KTransformersLinear(BaseInjectedModule, KLinearBase):
             self.generate_linear.unload()
             self.prefill_linear.load(w=w)
             self.device = self.prefill_linear.device
-            self.weight = self.prefill_linear.weight # modeling_xxx.py may use linear.weight
+            # self.weight = self.prefill_linear.weight # modeling_xxx.py may use linear.weight
         elif mode == InferenceState.GENERATE:
             self.prefill_linear.unload()
             self.generate_linear.load(w=w)
             self.device = self.generate_linear.device
-            self.weight = self.generate_linear.weight # modeling_xxx.py may use linear.weight
+            # self.weight = self.generate_linear.weight # modeling_xxx.py may use linear.weight
         elif mode == InferenceState.UNLOAD:
             self.prefill_linear.unload()
             self.generate_linear.unload()

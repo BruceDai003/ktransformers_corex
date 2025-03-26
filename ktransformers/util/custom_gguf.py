@@ -24,7 +24,7 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-import KTransformersOps
+# import KTransformersOps
 from .custom_loader import SafeTensorLoader
 import ctypes
 import math
@@ -546,7 +546,7 @@ def dequantize_q3_k_gpu(data, device:str ="cuda", target_dtype = torch.get_defau
     c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
     return KTransformersOps.dequantize_q3_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
 
-def dequantize_q4_k(data):
+def dequantize_q4_k(data, device=None, target_dtype = torch.get_default_dtype()):
     # C implementation
     # https://github.com/ggerganov/ggml/blob/fca1caafea7de9fbd7efc733b9818f9cf2da3050/src/ggml-quants.c#L1929
     # C struct definition
@@ -566,7 +566,11 @@ def dequantize_q4_k(data):
     # Interleave low and high quantized bits
     qs2 = np.stack([qs2 & 0xf, qs2 >> 4], axis=2).reshape(num_blocks, 8, 32)
     # Dequantize final weights using scales and offsets
-    return factors * qs2 - offsets
+    # return factors * qs2 - offsets
+    weight = factors * qs2 - offsets
+    if device is None:
+        return weight
+    return torch.from_numpy(weight).to(device=device)
 
 def dequantize_q4_k_gpu(data, device:str ="cuda", target_dtype = torch.get_default_dtype()):
     block_size = GGML_BLOCK_SIZES["Q4_K"]
@@ -644,7 +648,7 @@ def dequantize_q5_k_gpu(data, device:str ="cuda", target_dtype = torch.get_defau
     c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
     return KTransformersOps.dequantize_q5_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
 
-def dequantize_q6_k(data):
+def dequantize_q6_k(data, device = None, target_dtype = torch.get_default_dtype()):
     # C implementation
     # https://github.com/ggerganov/ggml/blob/fca1caafea7de9fbd7efc733b9818f9cf2da3050/src/ggml-quants.c#L2275
     # C struct definition
@@ -673,7 +677,7 @@ def dequantize_q6_k(data):
     q8 = (ql[:, 96:128] >>  4) | (((qh[:, 32:] >> 6) & 3) << 4) - 32
 
     # Dequantize
-    return scales * np.concatenate([
+    weight = scales * np.concatenate([
         sc[:,  0] * q1[:, :16],
         sc[:,  1] * q1[:, 16:],
         sc[:,  2] * q2[:, :16],
@@ -691,6 +695,10 @@ def dequantize_q6_k(data):
         sc[:, 14] * q8[:, :16],
         sc[:, 15] * q8[:, 16:],
     ], axis=1) 
+
+    if device is None:
+        return weight
+    return torch.from_numpy(weight).to(device=device)
 
 # @torch.jit.script
 def dequantize_q6_k_gpu(data: np.ndarray, device:str = "cuda", target_dtype = torch.get_default_dtype()):
@@ -857,9 +865,9 @@ GGML_DEQUANTIZE_GPU = {
     "Q8_0": dequantize_q8_0_gpu,
     "Q2_K": dequantize_q2_k_gpu,
     "Q3_K": dequantize_q3_k_gpu,
-    "Q4_K": dequantize_q4_k_gpu,
+    "Q4_K": dequantize_q4_k,
     "Q5_K": dequantize_q5_k_gpu,
-    "Q6_K": dequantize_q6_k_gpu,
+    "Q6_K": dequantize_q6_k,
     "IQ4_XS": dequantize_iq4_xs_gpu,
 }
 

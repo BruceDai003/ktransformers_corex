@@ -248,7 +248,7 @@ def _decode_grouped_att_m_fwd(
         PAGE_SIZE=page_size,
         logit_cap=logit_cap,
         num_warps=4,
-        num_stages=2,
+        num_stages=1,
         Lk=Lk,
         Lv=Lv,
         **extra_kargs,
