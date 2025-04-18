@@ -10,6 +10,7 @@ class GPUVendor(IntEnum):
     MooreThreads = auto()
     MetaX = auto()
     MUSA = auto()
+    Iluvatar = auto()
     Unknown = auto()
 
 class DeviceManager:
@@ -45,6 +46,8 @@ class DeviceManager:
             return GPUVendor.MetaX
         elif "musa" in device_name:
             return GPUVendor.MUSA
+        elif "iluvatar" in device_name:
+            return GPUVendor.Iluvatar
         
         # Backend check
         try:
@@ -61,7 +64,7 @@ class DeviceManager:
         """Get list of available device indices"""
         devices = []
         
-        if self.gpu_vendor == GPUVendor.NVIDIA or self.gpu_vendor == GPUVendor.AMD:
+        if self.gpu_vendor == GPUVendor.NVIDIA or self.gpu_vendor == GPUVendor.AMD or self.gpu_vendor == GPUVendor.Iluvatar:
             devices = list(range(torch.cuda.device_count()))
         elif self.gpu_vendor == GPUVendor.MUSA:
             try:
@@ -86,7 +89,7 @@ class DeviceManager:
             return "cpu"
             
         if isinstance(device_id, int):
-            if self.gpu_vendor == GPUVendor.NVIDIA or self.gpu_vendor == GPUVendor.AMD:
+            if self.gpu_vendor == GPUVendor.NVIDIA or self.gpu_vendor == GPUVendor.AMD or self.gpu_vendor == GPUVendor.Iluvatar:
                 if device_id < torch.cuda.device_count():
                     return f"cuda:{device_id}"
             elif self.gpu_vendor == GPUVendor.MUSA:

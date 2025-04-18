@@ -597,6 +597,17 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if device_manager.gpu_vendor == GPUVendor.Iluvatar:
+            return self.forward_linux_triton(
+                    hidden_states,
+                    attention_mask,
+                    position_ids,
+                    past_key_value,
+                    output_attentions,
+                    use_cache,
+                    cache_position,
+                    **kwargs,
+                )
         if os.name == 'nt' or get_compute_capability()<8 or device_manager.gpu_vendor != GPUVendor.NVIDIA:
             return self.forward_windows(
                 hidden_states,

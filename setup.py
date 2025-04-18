@@ -35,7 +35,7 @@ try:
     from torch_musa.utils.musa_extension import BuildExtension, MUSAExtension, MUSA_HOME
 except ImportError:
     MUSA_HOME=None
-    
+KTRANSFORMERS_BUILD_ILUVATAR = "iluvatar" in torch.cuda.get_device_name(0).lower()
 with_balance = os.environ.get("USE_BALANCE_SERVE", "0") == "1"
 
 class CpuInstructInfo:
@@ -444,21 +444,28 @@ elif MUSA_HOME is not None:
 else:
     raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
 
-ext_modules = [
-    CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
-    ops_module,
-    CUDAExtension(
-        'vLLMMarlin', [
-            'csrc/custom_marlin/binding.cpp',
-            'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
-            'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
-        ],
-        extra_compile_args={
-            'cxx': ['-O3'],
-            'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
-        },
-    )
-]
+if KTRANSFORMERS_BUILD_ILUVATAR:
+    # For Iluvatar GPU: currently not support other extensions
+    ext_modules = [
+        CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
+    ]
+
+else:
+    ext_modules = [
+        CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
+        ops_module,
+        CUDAExtension(
+            'vLLMMarlin', [
+                'csrc/custom_marlin/binding.cpp',
+                'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
+                'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
+            ],
+            extra_compile_args={
+                'cxx': ['-O3'],
+                'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
+            },
+        )
+    ]
 if with_balance:
     print("using balance_serve")
     ext_modules.append(

@@ -24,7 +24,9 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-import KTransformersOps
+from ktransformers.util.vendors import device_manager, get_device, to_device, GPUVendor
+if device_manager.gpu_vendor != GPUVendor.Iluvatar:
+    import KTransformersOps
 from .custom_loader import SafeTensorLoader
 import ctypes
 import math
@@ -569,6 +571,30 @@ def dequantize_q4_k(data):
     return factors * qs2 - offsets
 
 def dequantize_q4_k_gpu(data, device:str ="cuda", target_dtype = torch.get_default_dtype()):
+    if device_manager.gpu_vendor == GPUVendor.Iluvatar:
+        # C implementation
+        # https://github.com/ggerganov/ggml/blob/fca1caafea7de9fbd7efc733b9818f9cf2da3050/src/ggml-quants.c#L1929
+        # C struct definition
+        # https://github.com/ggerganov/ggml/blob/fca1caafea7de9fbd7efc733b9818f9cf2da3050/src/ggml-quants.h#L116
+        block_size = GGML_BLOCK_SIZES["Q4_K"]
+        num_blocks = len(data) // block_size
+        data_f16 = np.frombuffer(data, dtype=np.float16).reshape(num_blocks, block_size // 2)
+        data_u8 = np.frombuffer(data, dtype=np.uint8).reshape(num_blocks, block_size)
+        # Casting to float32 because float16 is very slow on CPU
+        scale_factors = data_f16[:, 0].reshape(num_blocks, 1, 1).astype(np.float32)
+        scale_offsets = data_f16[:, 1].reshape(num_blocks, 1, 1).astype(np.float32)
+        qs1 = data_u8[:, 4:16].reshape(num_blocks, 12, 1)
+        qs2 = data_u8[:, 16:].reshape(num_blocks, 4, 32)
+        # Dequantize scales and offsets (6 bits and 4 + 2 bits)
+        factors = scale_factors * np.concatenate([qs1[:, 0:4] & 0b111111, (qs1[:, 8:] & 15) | ((qs1[:, 0:4] >> 6) << 4)], axis=1)
+        offsets = scale_offsets * np.concatenate([qs1[:, 4:8] & 0b111111, (qs1[:, 8:] >> 4) | ((qs1[:, 4:8] >> 6) << 4)], axis=1)
+        # Interleave low and high quantized bits
+        qs2 = np.stack([qs2 & 0xf, qs2 >> 4], axis=2).reshape(num_blocks, 8, 32)
+        # Dequantize final weights using scales and offsets
+        weight = factors * qs2 - offsets
+        if device is None:
+            return weight
+        return torch.from_numpy(weight).to(device=device)
     block_size = GGML_BLOCK_SIZES["Q4_K"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q4_K"]
     data = np.frombuffer(data, dtype=data.dtype)
@@ -694,6 +720,53 @@ def dequantize_q6_k(data):
 
 # @torch.jit.script
 def dequantize_q6_k_gpu(data: np.ndarray, device:str = "cuda", target_dtype = torch.get_default_dtype()):
+    if device_manager.gpu_vendor == GPUVendor.Iluvatar:
+        block_size = GGML_BLOCK_SIZES["Q6_K"]
+        num_blocks = len(data) // block_size
+
+        data_f16 = np.frombuffer(data, dtype=np.float16).reshape(num_blocks, block_size // 2)
+        data_u8 = np.frombuffer(data, dtype=np.uint8).reshape(num_blocks, block_size)
+        data_i8 = np.frombuffer(data, dtype=np.int8).reshape(num_blocks, block_size)
+
+        scales = data_f16[:, -1].reshape(num_blocks, 1).astype(np.float32)
+        # TODO use uint8 and cast later?
+        ql = data_u8[:, :128].astype(np.int16)
+        qh = data_u8[:, 128:192].astype(np.int16)
+        sc = data_i8[:, 192:208, np.newaxis].astype(np.float32)
+
+        # Unpack bits, subtraction requires signed data type
+        q1 = (ql[:,   :32 ] & 0xF) | (((qh[:, :32] >> 0) & 3) << 4) - 32
+        q2 = (ql[:, 32:64 ] & 0xF) | (((qh[:, :32] >> 2) & 3) << 4) - 32
+        q3 = (ql[:,   :32 ] >>  4) | (((qh[:, :32] >> 4) & 3) << 4) - 32
+        q4 = (ql[:, 32:64 ] >>  4) | (((qh[:, :32] >> 6) & 3) << 4) - 32
+        q5 = (ql[:, 64:96 ] & 0xF) | (((qh[:, 32:] >> 0) & 3) << 4) - 32
+        q6 = (ql[:, 96:128] & 0xF) | (((qh[:, 32:] >> 2) & 3) << 4) - 32
+        q7 = (ql[:, 64:96 ] >>  4) | (((qh[:, 32:] >> 4) & 3) << 4) - 32
+        q8 = (ql[:, 96:128] >>  4) | (((qh[:, 32:] >> 6) & 3) << 4) - 32
+
+        # Dequantize
+        weight = scales * np.concatenate([
+            sc[:,  0] * q1[:, :16],
+            sc[:,  1] * q1[:, 16:],
+            sc[:,  2] * q2[:, :16],
+            sc[:,  3] * q2[:, 16:],
+            sc[:,  4] * q3[:, :16],
+            sc[:,  5] * q3[:, 16:],
+            sc[:,  6] * q4[:, :16],
+            sc[:,  7] * q4[:, 16:],
+            sc[:,  8] * q5[:, :16],
+            sc[:,  9] * q5[:, 16:],
+            sc[:, 10] * q6[:, :16],
+            sc[:, 11] * q6[:, 16:],
+            sc[:, 12] * q7[:, :16],
+            sc[:, 13] * q7[:, 16:],
+            sc[:, 14] * q8[:, :16],
+            sc[:, 15] * q8[:, 16:],
+        ], axis=1) 
+
+        if device is None:
+            return weight
+        return torch.from_numpy(weight).to(device=device)
     block_size = GGML_BLOCK_SIZES["Q6_K"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q6_K"]
     device = torch.device(device)

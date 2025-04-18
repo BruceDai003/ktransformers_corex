@@ -7,7 +7,9 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-import KTransformersOps
+from ktransformers.util.vendors import device_manager, get_device, to_device, GPUVendor
+if device_manager.gpu_vendor != GPUVendor.Iluvatar:
+    import KTransformersOps
 from safetensors import safe_open
 from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
 from safetensors.torch import save_file

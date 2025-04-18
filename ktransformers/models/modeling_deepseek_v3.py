@@ -62,7 +62,9 @@ if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
-
+from ktransformers.util.vendors import device_manager, GPUVendor
+if device_manager.gpu_vendor == GPUVendor.Iluvatar:
+    import ixformer.inference.functions as ops
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
 # It means that the function will not be traced through and simply appear as a node in the graph.
 if is_torch_fx_available():
@@ -102,6 +104,8 @@ class DeepseekV3RMSNorm(nn.Module):
         self.hidden_size = hidden_size
 
     def forward(self, hidden_states):
+        if device_manager.gpu_vendor == GPUVendor.Iluvatar:
+            return ops.residual_rms_norm(hidden_states, self.weight, self.variance_epsilon)[0]
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
